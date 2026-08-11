@@ -1,0 +1,9 @@
+requests
+psycopg2-binary
+pandas
+plotly
+streamlit
+streamlit-autorefresh
+sqlalchemy
+dbt-core~=1.7.0
+dbt-postgres~=1.7.0

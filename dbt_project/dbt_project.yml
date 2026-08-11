@@ -1,0 +1,16 @@
+name: flights_pipeline
+version: "1.0.0"
+config-version: 2
+profile: flights_pipeline
+model-paths: ["models"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  flights_pipeline:
+    staging:
+      +materialized: view
+      +schema: staging
+    marts:
+      +materialized: table
+      +schema: marts
