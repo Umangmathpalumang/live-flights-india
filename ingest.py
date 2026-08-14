@@ -4,8 +4,8 @@ import requests
 import psycopg2
 from datetime import datetime, timezone
 
+TOKEN_URL = "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token"
 OPENSKY_URL = "https://opensky-network.org/api/states/all"
-# Bounding box: mainland India plus margins
 BBOX = {"lamin": 6.0, "lomin": 68.0, "lamax": 37.5, "lomax": 97.5}
 
 DB_PARAMS = {
@@ -17,13 +17,30 @@ DB_PARAMS = {
 }
 
 
+def get_access_token():
+    client_id = os.environ.get("OPENSKY_CLIENT_ID")
+    client_secret = os.environ.get("OPENSKY_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        return None
+    resp = requests.post(
+        TOKEN_URL,
+        data={
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()["access_token"]
+
+
 def fetch_states():
-    auth = None
-    user = os.environ.get("OPENSKY_USER")
-    pw = os.environ.get("OPENSKY_PASS")
-    if user and pw:
-        auth = (user, pw)
-    resp = requests.get(OPENSKY_URL, params=BBOX, auth=auth, timeout=20)
+    headers = {}
+    token = get_access_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    resp = requests.get(OPENSKY_URL, params=BBOX, headers=headers, timeout=20)
     resp.raise_for_status()
     return resp.json().get("states") or []
 
