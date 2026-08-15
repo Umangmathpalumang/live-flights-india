@@ -19,7 +19,6 @@ PG_URL = os.environ.get(
 )
 engine = create_engine(PG_URL)
 
-# ---------- best-effort airline code map (OpenSky only gives us the callsign) ----------
 AIRLINE_MAP = {
     "AIC": "Air India", "AXB": "Air India Express", "IGO": "IndiGo",
     "SEJ": "SpiceJet", "GOW": "Go First", "VTI": "Vistara", "AKJ": "Akasa Air",
@@ -39,9 +38,9 @@ def derive_airline(callsign):
     return AIRLINE_MAP.get(prefix, f"Other ({prefix})")
 
 
-# ---------- theme ----------
+# ---------- theme (light by default now) ----------
 if "theme" not in st.session_state:
-    st.session_state.theme = "dark"
+    st.session_state.theme = "light"
 
 PALETTES = {
     "dark": dict(bg="#0E1117", card_bg="#161B24", card_border="#242B38",
@@ -55,36 +54,54 @@ P = PALETTES[st.session_state.theme]
 
 st.markdown(
     f"""
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
     html, body, [class*="css"] {{ font-family: 'Inter', sans-serif; }}
     .stApp {{ background-color: {P['bg']}; }}
     .kpi-card {{
         background-color: {P['card_bg']}; border: 1px solid {P['card_border']};
-        border-radius: 14px; padding: 18px 20px; box-shadow: 0 4px 14px rgba(0,0,0,0.15);
+        border-radius: 14px; padding: 18px 20px; box-shadow: 0 4px 14px rgba(0,0,0,0.10);
     }}
     .kpi-label {{ color: {P['muted']}; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px; }}
     .kpi-value {{ color: {P['text']}; font-size: 32px; font-weight: 800; line-height: 1.1; }}
-    .kpi-icon {{ font-size: 20px; margin-bottom: 8px; }}
+    .kpi-icon {{ font-size: 18px; margin-bottom: 8px; color: {P['accent']}; opacity: 0.85; }}
     .section-title {{ color: {P['text']}; font-size: 18px; font-weight: 700; margin: 6px 0 14px 0; }}
+    .section-title i {{ color: {P['accent']}; margin-right: 8px; font-size: 16px; }}
     .hero-title {{ color: {P['text']}; font-size: 34px; font-weight: 800; margin-bottom: 2px; }}
+    .hero-title i {{ color: {P['accent']}; margin-right: 10px; }}
     .hero-sub {{ color: {P['muted']}; font-size: 14px; margin-bottom: 10px; }}
     .last-updated {{ color: {P['muted']}; font-size: 12px; margin-top: -8px; }}
+    .last-updated i {{ margin-right: 5px; }}
     .filter-bar {{
         background-color: {P['card_bg']}; border: 1px solid {P['card_border']};
         border-radius: 14px; padding: 14px 18px 4px 18px; margin-bottom: 18px;
     }}
     [data-testid="stDataFrame"] {{ border-radius: 12px; overflow: hidden; border: 1px solid {P['card_border']}; }}
+    .stButton>button, .stDownloadButton>button {{ border-radius: 8px; }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 
-def kpi_card(icon, label, value):
+def hex_to_rgba(hex_color, alpha):
+    hex_color = hex_color.lstrip("#")
+    r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+def kpi_card(icon_class, label, value):
     st.markdown(
-        f"""<div class="kpi-card"><div class="kpi-icon">{icon}</div>
+        f"""<div class="kpi-card"><div class="kpi-icon"><i class="fa-solid {icon_class}"></i></div>
         <div class="kpi-label">{label}</div><div class="kpi-value">{value}</div></div>""",
+        unsafe_allow_html=True,
+    )
+
+
+def section_title(icon_class, text):
+    st.markdown(
+        f'<div class="section-title"><i class="fa-solid {icon_class}"></i>{text}</div>',
         unsafe_allow_html=True,
     )
 
@@ -92,14 +109,17 @@ def kpi_card(icon, label, value):
 # ---------- header row with theme toggle ----------
 h1, h2 = st.columns([5, 1])
 with h1:
-    st.markdown('<div class="hero-title">\U0001F6EB Live Flights Over India</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="hero-title"><i class="fa-solid fa-plane"></i>Live Flights Over India</div>',
+        unsafe_allow_html=True,
+    )
     st.markdown(
         '<div class="hero-sub">Live ADS-B data via OpenSky Network &middot; ingested every ~60s &middot; '
         'transformed with dbt &middot; served from Postgres &middot; self-managed VPS</div>',
         unsafe_allow_html=True,
     )
 with h2:
-    is_dark = st.toggle("\U0001F319 Dark mode", value=(st.session_state.theme == "dark"), key="theme_toggle")
+    is_dark = st.toggle("Dark mode", value=(st.session_state.theme == "dark"), key="theme_toggle")
     new_theme = "dark" if is_dark else "light"
     if new_theme != st.session_state.theme:
         st.session_state.theme = new_theme
@@ -111,6 +131,26 @@ def load_data():
     flights = pd.read_sql("select * from marts.current_flights", engine)
     kpis = pd.read_sql("select * from marts.dashboard_kpis", engine)
     return flights, kpis
+
+
+@st.cache_data(ttl=60)
+def load_trend():
+    # 5-minute traffic buckets over the last 3 hours, from the raw ingestion history
+    # (not the marts, which only reflect the current snapshot) - shows whether traffic
+    # is building up or dropping off, not just a single point-in-time count.
+    query = """
+        select
+            date_trunc('hour', fetched_at) + (extract(minute from fetched_at)::int / 5) * interval '5 minutes' as bucket,
+            count(distinct icao24) as aircraft_count
+        from raw.flight_states
+        where fetched_at > now() - interval '3 hours'
+        group by 1
+        order by 1
+    """
+    try:
+        return pd.read_sql(query, engine)
+    except Exception:
+        return pd.DataFrame(columns=["bucket", "aircraft_count"])
 
 
 try:
@@ -125,6 +165,7 @@ if kpis.empty or flights.empty:
 
 flights = flights.copy()
 flights["airline"] = flights["callsign"].apply(derive_airline)
+trend = load_trend()
 
 # ---------- filter bar ----------
 st.markdown('<div class="filter-bar">', unsafe_allow_html=True)
@@ -166,21 +207,42 @@ avg_speed = round(filtered["velocity"].dropna().mean(), 1) if not filtered["velo
 
 c1, c2, c3, c4, c5 = st.columns(5)
 with c1:
-    kpi_card("\u2708\ufe0f", "Flights (filtered)", total)
+    kpi_card("fa-plane-departure", "Flights (filtered)", total)
 with c2:
-    kpi_card("\U0001F6EC", "On Ground", on_ground_n)
+    kpi_card("fa-plane-arrival", "On Ground", on_ground_n)
 with c3:
-    kpi_card("\U0001F1EE\U0001F1F3", "Domestic (India)", domestic_n)
+    kpi_card("fa-flag", "Domestic (India)", domestic_n)
 with c4:
-    kpi_card("\U0001F30D", "International", international_n)
+    kpi_card("fa-earth-americas", "International", international_n)
 with c5:
-    kpi_card("\U0001F4A8", "Avg Speed (m/s)", avg_speed)
+    kpi_card("fa-gauge-high", "Avg Speed (m/s)", avg_speed)
 
-st.markdown(f'<div class="last-updated">Last updated: {k["last_updated_at"]}</div>', unsafe_allow_html=True)
+st.markdown(
+    f'<div class="last-updated"><i class="fa-regular fa-clock"></i>Last updated: {k["last_updated_at"]}</div>',
+    unsafe_allow_html=True,
+)
 st.markdown("<br>", unsafe_allow_html=True)
 
+# ---------- traffic trend (new feature) ----------
+if not trend.empty and len(trend) > 1:
+    section_title("fa-chart-line", "Traffic trend (last 3 hours)")
+    trend_fig = go.Figure()
+    trend_fig.add_trace(go.Scatter(
+        x=trend["bucket"], y=trend["aircraft_count"], mode="lines",
+        line=dict(color=P["accent"], width=2.5),
+        fill="tozeroy", fillcolor=hex_to_rgba(P["accent"], 0.13),
+    ))
+    trend_fig.update_layout(
+        paper_bgcolor=P["bg"], plot_bgcolor=P["bg"], font=dict(color=P["text"], size=11),
+        margin=dict(l=0, r=10, t=6, b=0), height=160,
+        xaxis=dict(gridcolor=P["card_border"], showgrid=False),
+        yaxis=dict(gridcolor=P["card_border"], title="Aircraft tracked"),
+    )
+    st.plotly_chart(trend_fig, use_container_width=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+
 # ---------- map ----------
-st.markdown('<div class="section-title">Current aircraft positions</div>', unsafe_allow_html=True)
+section_title("fa-map-location-dot", "Current aircraft positions")
 
 if not filtered.empty:
     map_fig = px.scatter_mapbox(
@@ -206,7 +268,7 @@ st.markdown("<br>", unsafe_allow_html=True)
 col_left, col_right = st.columns([1, 1])
 
 with col_left:
-    st.markdown('<div class="section-title">Top international origins</div>', unsafe_allow_html=True)
+    section_title("fa-earth-asia", "Top international origins")
     intl = filtered[filtered["origin_country"] != "India"]["origin_country"].value_counts().sort_values(ascending=True).tail(12)
     if not intl.empty:
         bar_fig = go.Figure(go.Bar(x=intl.values, y=intl.index, orientation="h", marker=dict(color=P["accent"])))
@@ -221,7 +283,7 @@ with col_left:
         st.info("No international flights in the current filter.")
 
 with col_right:
-    st.markdown('<div class="section-title">Top airlines (filtered)</div>', unsafe_allow_html=True)
+    section_title("fa-building", "Top airlines (filtered)")
     top_airlines = filtered["airline"].value_counts().sort_values(ascending=True).tail(12)
     if not top_airlines.empty:
         air_fig = go.Figure(go.Bar(x=top_airlines.values, y=top_airlines.index, orientation="h", marker=dict(color=P["accent"])))
@@ -240,10 +302,10 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ---------- snapshot + export ----------
 top_row = st.columns([4, 1])
 with top_row[0]:
-    st.markdown('<div class="section-title">Current snapshot</div>', unsafe_allow_html=True)
+    section_title("fa-table", "Current snapshot")
 with top_row[1]:
     st.download_button(
-        "\u2B07\ufe0f Download CSV",
+        "Download CSV",
         data=filtered.to_csv(index=False).encode("utf-8"),
         file_name="flights_snapshot.csv",
         mime="text/csv",
